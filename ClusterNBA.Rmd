@@ -1,0 +1,361 @@
+---
+title: "Clustering NBA players based on perfomance"
+author: "Alfonso Marino"
+date: "2024-04-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The NBA has a rich history spanning decades, with players of various skills, styles, and physical attributes gracing the courts. In this project, we leverage data spanning from 1950 to 2021 to gain deeper insights into player performance. Unlike traditional approaches that categorize players based solely on their positions (such as point guards, shooting guards, etc.), we employ cluster analysis to group players based on their overall performance metrics. This allows us to uncover hidden similarities and differences among players that may not be evident when considering positions alone.
+
+## Data Preparation
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(measurements)
+library(factoextra)
+
+nba = read.csv("/Users/alfonsomarino/Desktop/Progetti/nba/seasons_stats.csv")
+player_stat = read.csv("/Users/alfonsomarino/Desktop/Progetti/nba/player_data.csv")
+
+```
+
+```{r}
+nba %>%
+  glimpse()
+```
+```{r}
+player_stat %>%
+  glimpse()
+```
+When analyzing the null values present in *player_stat*, note how there are only 5 records corresponding to the weight column, which are removed because their presence historically has been marginal.
+
+```{r}
+player_stat %>% 
+  select(everything()) %>% 
+  summarise_all(list(~sum(is.na(.))))
+```
+```{r}
+player_stat %>%
+  filter(is.na(Wt) == T)
+```
+
+```{r}
+player_stat = player_stat %>%
+  drop_na(Wt)
+```
+
+Any duplicates are removed.
+
+```{r}
+player_stat[duplicated(player_stat),]
+```
+
+```{r}
+player_stat = player_stat %>% 
+  distinct(Player, .keep_all = T)
+```
+
+The columns for weight and height are measured in pounds and feet, respectively; for convenience of use we convert the units to kilograms and centimeters.
+
+```{r}
+convertHt <- function(x) {
+  heights <- as.character(x)  
+  heights_split <- strsplit(heights, "-")  
+  feet <- as.numeric(sapply(heights_split, `[`, 1)) 
+  inches <- as.numeric(sapply(heights_split, `[`, 2)) 
+  heights_cm <- round(conv_unit(feet, "ft", "cm") + conv_unit(inches, "inch", "cm"), 0)
+  
+  return(heights_cm) 
+}
+
+player_stat <- player_stat %>% 
+  rowwise() %>% 
+  mutate(Ht = convertHt(Ht), Wt = round(conv_unit(Wt, "lbs", "kg")))
+
+player_stat %>%
+  select(c(Wt, Ht)) %>%
+head(10)
+```
+Regarding the *nba* dataset, we remove the rows for the year 2022 because it is the same as the year 2021.
+
+```{r}
+nba = nba %>% 
+  filter(Year<2022)
+```
+
+Some players' names are flanked by an asterisk to symbolize their presence in the Hall of Fame. For convenience of use, we remove the asterisks and add an appropriate column.
+
+```{r}
+nba %>%
+  filter(str_detect(nba$Player, ".*\\*$")) %>%
+  select(Player) %>%
+  head(10)
+
+nba = nba %>%
+  mutate(HallOfFame = if_else(str_detect(Player, ".*\\*$"), "Yes", "No"))
+
+nba$Player = gsub("\\*$", "", nba$Player)
+player_stat$Player <- gsub("\\*$", "", player_stat$Player)
+```
+
+Per-game statistics and FTr are added.
+```{r}
+nba = nba %>% 
+  mutate(MpG = round(MP/G,3), PpG = round(PTS/G,3), ApG = round(AST/G,3), 
+         RpG = round(TRB/G,3), TOpG = round(TOV/G,3), BpG = round(BLK/G,3), 
+         SpG = round(STL/G,3),FpG = round(PF/G, 3), .before = 9)
+
+nba = nba %>% 
+  mutate(FTr = round(FT/FGA,3), .before = 30)
+```
+
+Positions are redefined.
+
+```{r}
+nba <- nba %>%
+  mutate(Pos = case_when(
+    Pos == "PF-C" ~ "PF",
+    Pos == "C-F" ~ "C",
+    Pos == "SF-SG" ~ "SF",
+    Pos == "C-PF" ~ "C",
+    Pos == "SG-SF" ~ "SG",
+    Pos == "PF-SF" ~ "PF",
+    Pos == "SF-PF" ~ "SF",
+    Pos == "SG-PG" ~ "SG",
+    Pos == "SF-PG" ~ "SF",
+    Pos == "C-SF" ~ "C",
+    Pos == "PG-SG" ~ "PG",
+    Pos == "PG-SF" ~ "PG",
+    Pos == "SG-PF" ~ "SG",
+    Pos == "SF-C" ~ "SF",
+    Pos == "F-C" ~ "PF",
+    Pos == "F-G" ~ "SF",
+    Pos == "G-F" ~ "SF",
+    Pos == "F" ~ "PF",
+    Pos == "G" ~ "SG",
+    TRUE ~ Pos
+  ))
+
+table(nba$Pos)
+```
+
+At this point the two datasets can be merged to get a comprehensive overview of the information. In addition to that, we also extract two datasets namely *nba_withTOT* and *nba_performance*. The former excludes partial statistics for those players who changed teams in the middle of the season; while the latter is filtered by minutes played.
+
+```{r}
+player_stat = player_stat %>% 
+  select(c("Player","Ht", "Wt"))
+player_stat = as.data.frame(player_stat)
+
+nba = left_join(nba, player_stat, by = "Player", relationship = "many-to-many")
+
+nba = nba %>% 
+  select(Year:Tm, HallOfFame:Wt, everything()) 
+
+nba = nba %>% 
+  distinct(Player,Year, Tm, Age, .keep_all = T)
+
+nba_withTOT = nba %>%
+  group_by(Year, Player) %>%
+  mutate(count_tot = sum(Tm == "TOT")) %>%
+  filter(count_tot == 0 | (count_tot > 0 & Tm == "TOT")) %>%
+  select(-count_tot)
+
+nba_withTOT = as.data.frame(nba_withTOT)
+
+nba_performance = nba_withTOT %>% 
+  filter(MpG > mean(MpG, na.rm = T) & Year > 1999)
+
+nba_performance = as.data.frame(nba_performance)
+```
+
+The full dataset contains several null values since not all statistics date back to the same historical period, so from time to time we are going to handle them without removing them. Also in the column for colleges, there are also blank spaces, these may be due to lack of information or because non-American players actually did not belong to any college. The NA values related to the Ht, Wt columns are due to the fact that those players are not present in the player_stat dataset.
+
+```{r}
+nba_performance %>% 
+  summarise_all(list(~sum(is.na(.))))
+```
+
+```{r}
+nba_performance$X3P. = replace(nba_performance$X3P., is.na(nba_performance$X3P.), 0)
+nba_performance$FT. = replace(nba_performance$FT., is.na(nba_performance$FT.), 0)
+
+nba_performance = nba_performance %>%
+  group_by(Pos) %>%
+  mutate(MeanWt = mean(Wt, na.rm = TRUE),
+         MeanHt = mean(Ht, na.rm = TRUE)) %>%
+  ungroup()
+
+nba_performance$Wt = ifelse(is.na(nba_performance$Wt), nba_performance$MeanWt, nba_performance$Wt)
+nba_performance$Ht = ifelse(is.na(nba_performance$Ht), nba_performance$MeanHt, nba_performance$Ht)
+
+nba_performance <- nba_performance %>% select(-c(MeanWt, MeanHt))
+
+nba_performance = as.data.frame(nba_performance)
+```
+
+## Physique evolution
+In recent decades, the evolution of NBA players' physiques has reflected a significant transformation in the game. Different positions on the court have shown distinctive variations in players' physiques over time. This evolution of physique reflects not only changes in the game itself, but also the training strategies and demands of the modern NBA style of play.
+
+```{r}
+PosColorCode <- c("C"="red", "PF"="orange", 
+                  "SF"="yellow" ,"SG"="blue", "PG"="green")
+```
+
+Note how centers and power forward are the strongest athletes physically, while point guards and small forwards are the lightest. Shooting guards have a very wide distribution, so they can be defined, in terms of physical stature, as the ideal NBA player prototype.
+
+```{r}
+physique <- nba_withTOT %>% 
+  group_by(Year, Pos) %>% 
+  summarise("Height" = mean(Ht, na.rm = T), "Weight"= mean(Wt, na.rm = T))
+#physique
+
+ggplot(physique, aes(x=Weight, y=Height, color=Pos)) + 
+  geom_point(size=4, alpha = 0.3)+
+  scale_color_manual(values = PosColorCode, name = "")
+```
+
+
+The game of basketball has inevitably changed a great deal since its inception, therefore, even the same conventional positions have adapted to the modern NBA. The most significant change came with the introduction of the three-point shot in the early 1980s, which radically changed the way the game was played. The new rule increased the importance of shooting skills from long distance, giving more responsibility for scoring points to players who, as opposed to pivots, played away from the basket. Traditionally, having a dominant center was fundamental to the structure of a team, but, however, in recent years, many teams have embraced a playing philosophy that emphasizes speed, mobility, and versatility, preferring lineups without a traditional center. This significant evolution in the position concept is called **"small ball"**. This has resulted in taller players also moving to the perimeter, with shorter players filling more interior roles. These new centers, referred to as **"big stretch"**, in addition to dominating in the painted area, are also able to shoot long range, pushing opponents out of their defensive comfort zone. This has opened up spaces for teammates and created new offensive opportunities.
+
+The evolution of the game led to a consequent transformation of the players, both in terms of individual technique and from the point of view of physical structure. It can be seen that, until the early 1980s, growth in terms of stature was stable. From there on there is no clear positive or negative trend, but it is evident how the last decade was the first in history in which NBA players became shorter than the previous decade. This decline is also tangible for individual positions, except for point guards who have reached their maximum height in recent seasons, the other positions have become shorter and shorter.
+
+```{r}
+avg <- nba_withTOT %>% 
+  group_by(Year) %>% 
+  summarise("Height"=mean(Ht, na.rm = T), "Weight"=mean(Wt, na.rm = T))
+
+ggplot(avg, aes(x=Year, y=Height, linetype = "Trend line")) +
+  geom_line()+
+  labs(x="Year", y="Height (cm)", title = "Evolution of average height")+
+  geom_hline(aes(yintercept = mean(Height), linetype = "Avg line"), col = "red", alpha = 0.5) +
+  scale_x_continuous(breaks = seq(1950, 2021, 10)) +
+  scale_linetype_manual(name = "", values = c(2, 1), guide = guide_legend(reverse = TRUE))+
+  theme(legend.position = "bottom")
+
+physique %>%
+  ggplot( aes(x=Year, y=Height, group=Pos, color=Pos)) +
+  geom_line()+
+  labs(x="Year", y = "Heaight (cm)", title = "Height evoultion by position")+
+  theme(legend.position = "bottom")+
+  scale_color_manual(values = PosColorCode , name = "")+
+  scale_x_continuous(breaks = seq(1950, 2021, 10))
+```
+
+
+
+In terms of weight, its average grew steadily until the 1970s, peaked in the 2010/11 season, and has been declining ever since, in fact the players are found to be among the lightest in the 21st century.
+It can be seen that since 2010 height and weight have undertaken a decreasing trend. This phenomenon can be attributed to the fact that NBA athletes, particularly the **"big men"**, have had to become faster and leaner to adapt to the perimeter-oriented game. This is why NBA centers and forwards are facing the greatest decline in their physical stature.
+Similar to the evolution of height, point guards are among the heaviest they have ever been, while all others have become lighter.
+
+```{r}
+ggplot(avg, aes(x=Year, y=Weight, linetype = "Trend line")) +
+  geom_line()+
+  labs(x="Anno", y="Weight (Kg)", title = "Evolution of average weight")+
+  geom_hline(aes(yintercept = mean(Weight), linetype = "Avg line"), col = "red", alpha = 0.5) +
+  scale_x_continuous(breaks = seq(1950, 2021, 10)) +
+  scale_linetype_manual(name = "", values = c(2, 1), guide = guide_legend(reverse = TRUE))+
+  theme(legend.position = "bottom")
+
+physique %>%
+  ggplot( aes(x=Year, y= Weight, group=Pos, color=Pos)) +
+  geom_line()+
+  labs(x="Year", y = "Weight (Kg)", title = "Weight evolution by position")+
+  theme(legend.position = "bottom")+
+  scale_color_manual(values = PosColorCode , name = "")+
+  scale_x_continuous(breaks = seq(1950, 2021, 10))
+```
+
+These technical and physical differences between positions are made explicit by some advanced statistics of the game represented by Oliver's four factors. It can be seen that centers and power forwards, taking advantage of their physicality, record high values for the percentage of rebounds collected per game and the rate of free throws obtained, the latter quantifying the player's aggressiveness to attack the basket and thus to obtain fouls; the point guards, being the players from whom each team's offensive actions start, are those who have the greatest ability to distibute smarcating passes to the forwards and thus simplify their finalization; demonstrating shooting skills, especially from behind the arc, is the percentage of three-point shots made in which the shooting guards excel.
+
+```{r}
+x = nba_performance %>% 
+  group_by(Pos) %>% 
+  summarise("TRB%"= mean(TRB., na.rm = T), "3P%"=mean(X3P., na.rm = T)*100,
+            "AST%"=mean(AST., na.rm = T), "FTr%" = mean(FTr, na.rm = T)*100)
+
+
+df <- data.frame(stats = rep(c("AST%", "FTr%", "3P%", "TRB%"), each = 5),
+                 position = rep(x$Pos, times = 4),
+                 value = c(x$`AST%`,x$`FTr%`, x$`3P%`, x$`TRB%`))
+
+ggplot(df, aes(fill = position, y = value, x = stats))+
+  geom_bar(position = "dodge", stat = "identity", alpha = 0.8)+
+  labs(x="%", y="")+
+  coord_flip()+
+  theme(legend.position = "bottom")+
+  scale_fill_manual(values = PosColorCode, name = "")
+```
+
+## Cluster analysis
+In the following section, the non-hierarchical k-means technique is applied to a group of NBA players related to the 2020/2021 season.
+
+In line with [Alagappam's study](https://www.wired.com/2012/04/analytics-basketball/), the variables considered in clustering will be:
+* points per game (PpG)
+* assists per game (ApG)
+* rebounds per game (RpG)
+* blocked shots per game (BpG)
+* stolen balls per game (SpG)
+* possessions lost per game (TOpG)
+* fouls per game (FpG)
+
+
+```{r}
+players <- nba_performance %>% 
+  filter(Year == 2021) %>% 
+  mutate("FpG" = round(PF/G,3)) %>% 
+  select(Player, Pos, PpG, ApG, RpG, BpG, SpG, TOpG, FpG)
+table(players$Pos)
+```
+
+```{r}
+players_data <- players[3:9]
+plot(players_data)
+```
+
+Before beginning the analysis, it should be pointed out how the use of k-means on raw data could provide results that are not very useful because they are highly variable. Therefore, as with hierarchical clustering procedures, we chose to normalize each variable, that is, transform them so that they have a mean of zero and a standard deviation of one, through the scale() function.
+```{r}
+players_data_scale <- scale(players_data)
+```
+
+The methodology involves a preliminary hierarchical analysis to determine the appropriate number of partitions. The technique is that of the elbow method, which is based on analyzing the variation of the within-cluster sum-of-squares index, also known as WSS (Within-Cluster Sum of Squares).
+The main idea of the elbow method is to identify the point at which the WSS index curve exhibits an "elbow" or an abrupt reversal of its trend. This point indicates the optimal number of clusters to be used.
+```{r}
+fviz_nbclust(players_data_scale, kmeans, method = "wss")+
+  labs(subtitle = "Elbow method")
+```
+```{r}
+set.seed(123)
+km.out <- kmeans(players_data_scale, centers = 3)
+print(km.out)
+plot(players_data, col = km.out$cluster)
+```
+
+The main output produced by the algorithm is as follows:
+```{r}
+km.clusters <- km.out$cluster
+
+rownames(players_data_scale) <- players$Player
+
+fviz_cluster(list(data = players_data_scale, cluster= km.clusters))
+table(km.clusters, players$Pos)
+```
+
+```{r}
+library(BasketballAnalyzeR)
+set.seed(123)
+kc <- kclustering(players_data, k=3, labels = players$Player)
+plot(kc, profiles = F, title = c("Scoring Leaders","Perimeter Facilitator","Painted Protectors"))
+```
+
+```{r}
+players %>%
+  mutate(Cluster = km.clusters) %>% 
+  group_by(Cluster) %>%
+  select(-Player, -Pos) %>% 
+  summarise_all(mean)
+```
