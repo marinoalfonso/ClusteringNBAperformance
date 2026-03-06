@@ -1,0 +1,15 @@
+# R
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output — track figures, ignore everything else
+output/*
+!output/figures/
+output/figures/*
+!output/figures/*.png
